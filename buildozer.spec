@@ -6,8 +6,8 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json
 version = 1.1
 
-# Только стабильные библиотеки, гарантирующие успешную сборку
-requirements = python3,kivy,numpy,pandas,openpyxl,reportlab
+requirements = python3,kivy,reportlab
+log_level = 2
 
 orientation = portrait
 fullscreen = 0
@@ -15,6 +15,8 @@ android.archs = arm64-v8a
 android.allow_backup = True
 icon.filename = %(source.dir)s/icon.png
 
-# Запрос прав на чтение и запись файлов (для датасетов и отчетов)
+# ЖЕСТКО ФИКСИРУЕМ СТАБИЛЬНУЮ ВЕРСИЮ NDK ДЛЯ PANDAS И NUMPY:
+android.ndk = 25b
+
 android.permissions = READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, INTERNET
 android.api = 33

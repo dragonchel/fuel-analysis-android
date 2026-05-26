@@ -1,10 +1,10 @@
 # regression_core_android.py
 import os
 import json
-import numpy as np
-import pandas as pd
+import csv
+import math
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -12,7 +12,6 @@ MODEL_FILE = "trained_model.json"
 CO2_PER_LITER = 2.68          
 COST_PER_TON_CO2 = 50         
 
-# Базовые коэффициенты по умолчанию (если датасет еще не загружался)
 DEFAULT_MODEL = {
     "intercept": 10.50,
     "coef_weight": 0.78,
@@ -35,28 +34,90 @@ def save_model(model_data):
     with open(MODEL_FILE, "w") as f:
         json.dump(model_data, f)
 
-def train_model_from_excel(file_path):
-    """ Математический эквивалент run_regression из Windows на чистом NumPy """
+def determinant3x3(m):
+    """ Вычисление определителя матрицы 3x3 (Правило треугольника) """
+    return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+            m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+            m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+
+def train_model_from_csv(file_path):
+    """ Математический эквивалент МНК регрессии на чистом Python и CSV """
     try:
-        df = pd.read_excel(file_path, sheet_name="Данные")
-        X = df[['Вес, т', 'Скорость, км/ч']].values
-        Y = df['Расходтоплива, л/100 км'].values
+        weights = []
+        speeds = []
+        fuels = []
         
-        # Метод наименьших квадратов (МНК): (X^T * X)^-1 * X^T * Y
-        X_design = np.hstack([np.ones((X.shape[0], 1)), X])
-        beta = np.linalg.inv(X_design.T @ X_design) @ X_design.T @ Y
+        # Чтение данных из CSV файла
+        with open(file_path, mode='r', encoding='utf-8') as f:
+            # Автоопределение разделителя (запятая или точка с запятой)
+            sample = f.read(2048)
+            f.seek(0)
+            delimiter = ';' if ';' in sample else ','
+            
+            reader = csv.DictReader(f, delimiter=delimiter)
+            for row in reader:
+                # Очищаем ключи от пробелов на случай неточных заголовков
+                clean_row = {k.strip(): v for k, v in row.items() if k}
+                
+                # Преобразуем строки в числа (обрабатывая возможные запятые вместо точек)
+                w = float(str(clean_row['Вес, т']).replace(',', '.'))
+                s = float(str(clean_row['Скорость, км/ч']).replace(',', '.'))
+                f_val = float(str(clean_row['Расходтоплива, л/100 км']).replace(',', '.'))
+                
+                weights.append(w)
+                speeds.append(s)
+                fuels.append(f_val)
+                
+        n = len(fuels)
+        if n < 4:
+            return {"success": False, "error": "Недостаточно данных для обучения (требуется минимум 4 строки)"}
+            
+        # Нахождение необходимых сумм для построения нормальных уравнений МНК
+        sum_w = sum(weights)
+        sum_s = sum(speeds)
+        sum_f = sum(fuels)
         
-        intercept, coef_weight, coef_speed = beta[0], beta[1], beta[2]
+        sum_w2 = sum(w**2 for w in weights)
+        sum_s2 = sum(s**2 for s in speeds)
+        sum_ws = sum(w * s for w, s in zip(weights, speeds))
         
-        Y_pred = X_design @ beta
-        residuals = Y - Y_pred
-        ss_res = np.sum(residuals**2)
-        ss_tot = np.sum((Y - np.mean(Y))**2)
-        r2 = 1 - (ss_res / ss_tot)
+        sum_wf = sum(w * f for w, f in zip(weights, fuels))
+        sum_sf = sum(s * f for s, f in zip(speeds, fuels))
         
-        # Оценка погрешности (Аналог распределения Стьюдента)
-        dof = X.shape[0] - 3
-        se = np.sqrt(ss_res / dof) if dof > 0 else 0.1
+        # Матрица системы X^T * X
+        M = [
+            [float(n), sum_w, sum_s],
+            [sum_w, sum_w2, sum_ws],
+            [sum_s, sum_ws, sum_s2]
+        ]
+        
+        det_M = determinant3x3(M)
+        if abs(det_M) < 1e-7:
+            return {"success": False, "error": "Матрица данных вырождена (факторы линейно зависимы)"}
+            
+        # Матрицы для нахождения неизвестных методом Крамера
+        M0 = [[sum_f, sum_w, sum_s], [sum_wf, sum_w2, sum_ws], [sum_sf, sum_ws, sum_s2]]
+        M1 = [[float(n), sum_f, sum_s], [sum_w, sum_wf, sum_ws], [sum_s, sum_sf, sum_s2]]
+        M2 = [[float(n), sum_w, sum_f], [sum_w, sum_w2, sum_wf], [sum_s, sum_ws, sum_sf]]
+        
+        intercept = determinant3x3(M0) / det_M
+        coef_weight = determinant3x3(M1) / det_M
+        coef_speed = determinant3x3(M2) / det_M
+        
+        # Расчет коэффициента детерминации R^2
+        mean_f = sum_f / n
+        ss_tot = sum((f - mean_f)**2 for f in fuels)
+        
+        ss_res = 0.0
+        for w, s, f_val in zip(weights, speeds, fuels):
+            pred = intercept + (coef_weight * w) + (coef_speed * s)
+            ss_res += (f_val - pred)**2
+            
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        
+        # Расчет статистической погрешности (Критерий Стьюдента)
+        dof = n - 3
+        se = math.sqrt(ss_res / dof) if dof > 0 else 0.1
         t_crit = 1.96 if dof > 30 else 2.0 + (2.5 / max(dof, 1))
         margin_of_error = se * t_crit
         
@@ -69,7 +130,7 @@ def train_model_from_excel(file_path):
             "is_trained": True
         }
         save_model(model_data)
-        return {"success": True, "data": model_data, "total_rows": len(df)}
+        return {"success": True, "data": model_data, "total_rows": n}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -89,7 +150,6 @@ def calculate_single_trip(w, s, actual_f):
     }
 
 def export_to_pdf_android(output_path, report_text):
-    """ Создание чистого PDF-отчета """
     try:
         doc = SimpleDocTemplate(output_path, pagesize=letter)
         styles = getSampleStyleSheet()
